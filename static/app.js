@@ -139,8 +139,11 @@ function setupFormDefaults() {
     status.textContent = '';
     const roommate_id = Number(document.getElementById('roommate').value);
     const title = document.getElementById('title').value.trim() || 'Interview';
-    const start = document.getElementById('start').value.replace(' ', 'T');
-    const end = document.getElementById('end').value.replace(' ', 'T');
+    const startLocal = document.getElementById('start').value; // YYYY-MM-DDTHH:MM (local)
+    const endLocal = document.getElementById('end').value;
+    // Convert to RFC3339 UTC so server and calendar compare reliably
+    const start = new Date(startLocal).toISOString();
+    const end = new Date(endLocal).toISOString();
     const location = document.getElementById('location').value.trim();
     const notes = document.getElementById('notes').value.trim();
     const rejectOnConflict = document.getElementById('rejectOnConflict').checked;
@@ -166,7 +169,7 @@ function setupFormDefaults() {
 function initCalendar() {
   const calEl = document.getElementById('calendar');
   calendar = new FullCalendar.Calendar(calEl, {
-    initialView: 'timeGridWeek',
+    initialView: 'dayGridMonth',
     height: 'auto',
     slotMinTime: '06:00:00',
     slotMaxTime: '23:00:00',
@@ -219,4 +222,3 @@ init().catch((e) => {
   console.error(e);
   alert('Failed to initialize app');
 });
-

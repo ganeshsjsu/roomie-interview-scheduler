@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory, g
 
@@ -80,30 +80,37 @@ def create_app():
         return jsonify(dict(row))
 
     def parse_iso(ts: str):
-        # Accepts both with and without timezone; stores as input string
-        # Validate format; we try common ISO patterns
+        # Accepts RFC3339/ISO-8601 with or without timezone.
+        # Returns a normalized string; timezone inputs are normalized to UTC 'Z'.
         if not isinstance(ts, str) or not ts.strip():
             raise ValueError('invalid timestamp')
-        s = ts.strip()
-        # Replace space with T for coherence
-        s = s.replace(' ', 'T')
-        # Try parsing a few common formats just to validate
-        fmts = [
-            '%Y-%m-%dT%H:%M',
-            '%Y-%m-%dT%H:%M:%S',
-            '%Y-%m-%dT%H:%M:%S.%f',
-            '%Y-%m-%dT%H:%M%z',
-            '%Y-%m-%dT%H:%M:%S%z',
-            '%Y-%m-%dT%H:%M:%S.%f%z',
-        ]
-        for fmt in fmts:
-            try:
-                datetime.strptime(s, fmt)
-                return s
-            except ValueError:
-                continue
-        # If all fail, still accept raw ISO-like string but error out
-        raise ValueError('invalid ISO datetime')
+        s = ts.strip().replace(' ', 'T')
+        s = s[:-1] + '+00:00' if s.endswith('Z') else s
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            # Fallback to a few strict patterns
+            fmts = [
+                '%Y-%m-%dT%H:%M',
+                '%Y-%m-%dT%H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S.%f',
+                '%Y-%m-%dT%H:%M%z',
+                '%Y-%m-%dT%H:%M:%S%z',
+                '%Y-%m-%dT%H:%M:%S.%f%z',
+            ]
+            for fmt in fmts:
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                raise ValueError('invalid ISO datetime')
+        # Normalize: timezone-aware -> UTC Z; naive -> keep as local naive string with seconds
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc)
+            return dt.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        return dt.replace(microsecond=0).isoformat()
 
     def event_row_to_dict(row):
         return {
@@ -129,10 +136,10 @@ def create_app():
         args = []
         where = []
         if start:
-            where.append('e.end > ?')
+            where.append('julianday(replace(e.end, "T", " ")) > julianday(replace(?, "T", " "))')
             args.append(start)
         if end:
-            where.append('e.start < ?')
+            where.append('julianday(replace(e.start, "T", " ")) < julianday(replace(?, "T", " "))')
             args.append(end)
         sql = base + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY e.start'
         rows = g.db.execute(sql, args).fetchall()
@@ -144,7 +151,8 @@ def create_app():
             'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, '
             'e.roommate_id, r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id '
-            'WHERE e.start < ? AND e.end > ?'
+            'WHERE julianday(replace(e.start, "T", " ")) < julianday(replace(?, "T", " ")) '
+            'AND julianday(replace(e.end, "T", " ")) > julianday(replace(?, "T", " "))'
         )
         if exclude_event_id is not None:
             sql += ' AND e.id != ?'
