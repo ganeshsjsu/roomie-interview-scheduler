@@ -50,6 +50,15 @@ function toLocalInputValue(date) {
 let calendar;
 let roommates = [];
 let roommateFilters = new Set();
+let selectedEvent = null;
+
+function formatLocal(dt) {
+  const d = dt instanceof Date ? dt : new Date(dt);
+  return d.toLocaleString([], {
+    weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
 
 async function init() {
   roommates = await api.getRoommates();
@@ -58,6 +67,7 @@ async function init() {
   renderRoommatesSettings();
   setupFormDefaults();
   initCalendar();
+  initEventDialog();
 }
 
 function renderRoommateDropdown() {
@@ -191,7 +201,7 @@ function initCalendar() {
             end: e.end,
             backgroundColor: e.roommate.color,
             borderColor: e.roommate.color,
-            extendedProps: { location: e.location, notes: e.notes, roommate: e.roommate }
+            extendedProps: { location: e.location, notes: e.notes, roommate: e.roommate, originalTitle: e.title }
           }));
         success(data);
       } catch (err) {
@@ -205,17 +215,41 @@ function initCalendar() {
       if (notes) tip += `Notes: ${notes}`;
       if (tip) info.el.title = tip;
     },
-    eventClick: async (info) => {
-      if (!confirm('Delete this interview?')) return;
-      try {
-        await api.deleteEvent(info.event.id);
-        calendar.refetchEvents();
-      } catch (e) {
-        alert('Failed to delete');
-      }
+    eventClick: (info) => {
+      openEventDialog(info.event);
     }
   });
   calendar.render();
+}
+
+function initEventDialog() {
+  const dialog = document.getElementById('event-dialog');
+  const btnClose = document.getElementById('dlg-close');
+  const btnDelete = document.getElementById('dlg-delete');
+  btnClose.addEventListener('click', () => dialog.close());
+  btnDelete.addEventListener('click', async () => {
+    if (!selectedEvent) return;
+    if (!confirm('Delete this interview?')) return;
+    try {
+      await api.deleteEvent(selectedEvent.id);
+      dialog.close();
+      calendar.refetchEvents();
+    } catch (e) {
+      alert('Failed to delete');
+    }
+  });
+}
+
+function openEventDialog(event) {
+  selectedEvent = event;
+  const dialog = document.getElementById('event-dialog');
+  document.getElementById('dlg-roommate').textContent = event.extendedProps.roommate?.name || '';
+  document.getElementById('dlg-evtitle').textContent = event.extendedProps.originalTitle || event.title || '';
+  document.getElementById('dlg-start').textContent = formatLocal(event.start);
+  document.getElementById('dlg-end').textContent = formatLocal(event.end);
+  document.getElementById('dlg-location').textContent = event.extendedProps.location || '—';
+  document.getElementById('dlg-notes').textContent = event.extendedProps.notes || '—';
+  if (dialog.showModal) dialog.showModal(); else dialog.show();
 }
 
 init().catch((e) => {

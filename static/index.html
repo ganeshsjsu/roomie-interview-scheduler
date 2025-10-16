@@ -65,8 +65,27 @@
       </details>
     </main>
 
+    <dialog id="event-dialog">
+      <article>
+        <header>
+          <h3>Interview Details</h3>
+        </header>
+        <div class="details">
+          <p><strong>Roommate:</strong> <span id="dlg-roommate"></span></p>
+          <p><strong>Title:</strong> <span id="dlg-evtitle"></span></p>
+          <p><strong>Start:</strong> <span id="dlg-start"></span></p>
+          <p><strong>End:</strong> <span id="dlg-end"></span></p>
+          <p><strong>Location:</strong> <span id="dlg-location"></span></p>
+          <p><strong>Notes:</strong> <span id="dlg-notes"></span></p>
+        </div>
+        <footer>
+          <button id="dlg-delete" class="secondary">Delete</button>
+          <button id="dlg-close" autofocus>Close</button>
+        </footer>
+      </article>
+    </dialog>
+
     <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
     <script src="app.js"></script>
   </body>
   </html>
-

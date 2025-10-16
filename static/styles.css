@@ -16,3 +16,6 @@ body { padding-bottom: 2rem; }
 .fc .fc-toolbar-title { font-size: 1.1rem; }
 .fc .fc-event { opacity: 0.95; }
 
+/* Event details dialog */
+dialog article { max-width: 560px; }
+dialog .details p { margin: 0.25rem 0; }
