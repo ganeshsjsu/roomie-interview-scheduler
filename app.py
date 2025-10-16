@@ -61,6 +61,54 @@ def _add_ssl_and_ipv4_to_url(url: str) -> tuple[str, Optional[str]]:
         return new_url, None
 
 
+def _set_url_port(url: str, new_port: int) -> str:
+    parts = urlsplit(url)
+    username = parts.username or ''
+    password = parts.password or ''
+    hostname = parts.hostname or ''
+    # Recompose credentials safely
+    auth = ''
+    if username:
+        auth = username
+        if password:
+            auth += f":{password}"
+        auth += '@'
+    netloc = f"{auth}{hostname}:{new_port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def _pg_connect(dsn: str, row_factory=None):
+    import psycopg
+    from psycopg.rows import dict_row
+    url, ipv4 = _add_ssl_and_ipv4_to_url(dsn)
+    kwargs = {}
+    if row_factory:
+        kwargs['row_factory'] = row_factory
+    else:
+        kwargs['row_factory'] = dict_row
+    # First attempt: as-is, prefer IPv4 if available
+    try:
+        if ipv4:
+            return psycopg.connect(url, hostaddr=ipv4, **kwargs)
+        return psycopg.connect(url, **kwargs)
+    except Exception as e:
+        msg = repr(e)
+        # Fallback: if Supabase on 5432, try pooled port 6543
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname or ''
+            port = parts.port or 5432
+            if host.endswith('.supabase.co') and port != 6543:
+                url2 = _set_url_port(url, 6543)
+                url2, ipv4b = _add_ssl_and_ipv4_to_url(url2)
+                if ipv4b:
+                    return psycopg.connect(url2, hostaddr=ipv4b, **kwargs)
+                return psycopg.connect(url2, **kwargs)
+        except Exception:
+            pass
+        raise
+
+
 def create_app():
     app = Flask(__name__, static_folder='static', template_folder='templates')
 
@@ -75,13 +123,8 @@ def create_app():
             conn.row_factory = sqlite3.Row
             return conn
         else:
-            # Lazy import to avoid requiring psycopg locally when unused
-            import psycopg
-            from psycopg.rows import dict_row
-            url, ipv4 = _add_ssl_and_ipv4_to_url(DATABASE_URL)
-            if ipv4:
-                return psycopg.connect(url, row_factory=dict_row, hostaddr=ipv4)
-            return psycopg.connect(url, row_factory=dict_row)
+            # Lazy import via helper and fallback to pooler/IPv4
+            return _pg_connect(DATABASE_URL)
 
     def _adapt_sql(sql: str) -> str:
         # Our SQL is written with SQLite-style '?' placeholders.
@@ -460,13 +503,8 @@ def init_db():
                 db.executemany('INSERT INTO roommates(name, color) VALUES (?,?)', defaults)
             db.commit()
     else:
-        # Postgres init
-        import psycopg
-        init_url, ipv4 = _add_ssl_and_ipv4_to_url(DATABASE_URL)
-        conn_kwargs = {}
-        if ipv4:
-            conn_kwargs['hostaddr'] = ipv4
-        with closing(psycopg.connect(init_url, **conn_kwargs)) as db:
+        # Postgres init (uses same fallback logic)
+        with closing(_pg_connect(DATABASE_URL)) as db:
             with db.cursor() as cur:
                 cur.execute('''
                     CREATE TABLE IF NOT EXISTS roommates (
