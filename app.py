@@ -1,8 +1,10 @@
 import os
 import sqlite3
+import socket
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from contextlib import closing
 from datetime import datetime, timezone
-from typing import Optional, Any, Iterable, Tuple
+from typing import Optional, Any, Iterable
 from flask import Flask, jsonify, request, send_from_directory, g
 
 
@@ -34,6 +36,31 @@ def _ensure_db_path_and_migrate():
         pass
 
 
+def _add_ssl_and_ipv4_to_url(url: str) -> tuple[str, Optional[str]]:
+    """Ensure sslmode=require in connstring and resolve IPv4 hostaddr.
+
+    Returns (possibly modified url, ipv4_hostaddr or None).
+    """
+    parts = urlsplit(url)
+    # Ensure sslmode=require
+    q = dict(parse_qsl(parts.query, keep_blank_values=True))
+    q.setdefault('sslmode', 'require')
+    new_query = urlencode(q)
+    new_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+    # Resolve IPv4 address (best-effort)
+    try:
+        host = parts.hostname
+        port = parts.port or 5432
+        ipv4 = None
+        if host:
+            infos = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
+            if infos:
+                ipv4 = infos[0][4][0]
+        return new_url, ipv4
+    except Exception:
+        return new_url, None
+
+
 def create_app():
     app = Flask(__name__, static_folder='static', template_folder='templates')
 
@@ -51,7 +78,10 @@ def create_app():
             # Lazy import to avoid requiring psycopg locally when unused
             import psycopg
             from psycopg.rows import dict_row
-            return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+            url, ipv4 = _add_ssl_and_ipv4_to_url(DATABASE_URL)
+            if ipv4:
+                return psycopg.connect(url, row_factory=dict_row, hostaddr=ipv4)
+            return psycopg.connect(url, row_factory=dict_row)
 
     def _adapt_sql(sql: str) -> str:
         # Our SQL is written with SQLite-style '?' placeholders.
@@ -432,7 +462,11 @@ def init_db():
     else:
         # Postgres init
         import psycopg
-        with closing(psycopg.connect(DATABASE_URL)) as db:
+        init_url, ipv4 = _add_ssl_and_ipv4_to_url(DATABASE_URL)
+        conn_kwargs = {}
+        if ipv4:
+            conn_kwargs['hostaddr'] = ipv4
+        with closing(psycopg.connect(init_url, **conn_kwargs)) as db:
             with db.cursor() as cur:
                 cur.execute('''
                     CREATE TABLE IF NOT EXISTS roommates (
