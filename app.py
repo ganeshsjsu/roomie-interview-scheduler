@@ -330,8 +330,9 @@ def init_db():
             db.executemany('INSERT INTO roommates(name, color) VALUES (?,?)', defaults)
         db.commit()
 
+# Expose a module-level WSGI variable for platforms expecting 'app:app'
+app = create_app()
 
 if __name__ == '__main__':
-    app = create_app()
     port = int(os.environ.get('PORT', '5000'))
     app.run(host='127.0.0.1', port=port, debug=True)
