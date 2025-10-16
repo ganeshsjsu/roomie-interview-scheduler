@@ -211,14 +211,14 @@ def create_app():
 
     def query_events(start: Optional[str], end: Optional[str]):
         base = (
-            'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, '
+            'SELECT e.id, e.title, e.start, e."end" as "end", e.location, e.notes, '
             'e.roommate_id, r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id'
         )
         args = []
         where = []
         if start:
-            where.append('e.end > ?')
+            where.append('e."end" > ?')
             args.append(start)
         if end:
             where.append('e.start < ?')
@@ -230,10 +230,10 @@ def create_app():
     def find_conflicts(start: str, end: str, exclude_event_id: Optional[int] = None):
         args = [start, end]
         sql = (
-            'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, '
+            'SELECT e.id, e.title, e.start, e."end" as "end", e.location, e.notes, '
             'e.roommate_id, r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id '
-            'WHERE e.start < ? AND e.end > ?'
+            'WHERE e.start < ? AND e."end" > ?'
         )
         if exclude_event_id is not None:
             sql += ' AND e.id != ?'
@@ -282,20 +282,20 @@ def create_app():
 
         if DB_MODE == 'pg':
             cur = db_execute(
-                'INSERT INTO events(roommate_id, title, start, end, location, notes) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
+                'INSERT INTO events(roommate_id, title, start, "end", location, notes) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
                 (roommate_id, title, start, end, location, notes)
             )
             eid = cur.fetchone()['id']
             g.db.commit()
         else:
             cur = db_execute(
-                'INSERT INTO events(roommate_id, title, start, end, location, notes) VALUES (?, ?, ?, ?, ?, ?)',
+                'INSERT INTO events(roommate_id, title, start, "end", location, notes) VALUES (?, ?, ?, ?, ?, ?)',
                 (roommate_id, title, start, end, location, notes)
             )
             g.db.commit()
             eid = cur.lastrowid
         row = db_query_one(
-            'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, e.roommate_id, '
+            'SELECT e.id, e.title, e.start, e."end" as "end", e.location, e.notes, e.roommate_id, '
             'r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id WHERE e.id=?', (eid,)
         )
@@ -343,7 +343,7 @@ def create_app():
             return jsonify({'error': 'no fields to update'}), 400
 
         # Fetch existing to validate time order if both present after update
-        existing = db_query_one('SELECT start, end FROM events WHERE id=?', (eid,))
+        existing = db_query_one('SELECT start, "end" as "end" FROM events WHERE id=?', (eid,))
         new_start = None
         new_end = None
         for i, f in enumerate(fields):
@@ -358,12 +358,14 @@ def create_app():
         if new_start >= new_end:
             return jsonify({'error': 'end must be after start'}), 400
 
-        db_execute(f'UPDATE events SET {", ".join(fields)} WHERE id=?', (*args, eid))
+        # Quote reserved column name "end" in update fields
+        fields_q = [f.replace('end=?', '"end"=?') for f in fields]
+        db_execute(f'UPDATE events SET {", ".join(fields_q)} WHERE id=?', (*args, eid))
         g.db.commit()
         # Conflicts after update (exclude this event)
         conflicts = find_conflicts(new_end, new_start, exclude_event_id=eid)
         row = db_query_one(
-            'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, e.roommate_id, '
+            'SELECT e.id, e.title, e.start, e."end" as "end", e.location, e.notes, e.roommate_id, '
             'r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id WHERE e.id=?', (eid,)
         )
