@@ -2,28 +2,95 @@ import os
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any, Iterable, Tuple
 from flask import Flask, jsonify, request, send_from_directory, g
 
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-# Allow overriding DB path for cloud deploys with persistent disks
+# Allow overriding DB path for cloud deploys with persistent disks (SQLite fallback)
 DB_PATH = os.environ.get('DB_PATH', os.path.join(APP_DIR, 'data.db'))
+# Prefer Postgres if DATABASE_URL is provided (e.g., Supabase)
+DATABASE_URL = os.environ.get('DATABASE_URL')
+DB_MODE = 'pg' if DATABASE_URL and DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'
+
+
+def _ensure_db_path_and_migrate():
+    """Ensure target DB directory exists and migrate legacy DB if needed.
+
+    If DB_PATH points outside the app dir (e.g., /data/data.db) and that file
+    doesn't exist yet, but an existing legacy DB exists at APP_DIR/data.db,
+    copy it so existing local data is preserved when first attaching a disk.
+    """
+    try:
+        target_dir = os.path.dirname(DB_PATH)
+        if target_dir and not os.path.exists(target_dir):
+            os.makedirs(target_dir, exist_ok=True)
+        legacy = os.path.join(APP_DIR, 'data.db')
+        if not os.path.exists(DB_PATH) and os.path.exists(legacy) and os.path.abspath(legacy) != os.path.abspath(DB_PATH):
+            import shutil
+            shutil.copy2(legacy, DB_PATH)
+    except Exception as e:
+        # Non-fatal; DB will be created fresh if needed
+        pass
 
 
 def create_app():
     app = Flask(__name__, static_folder='static', template_folder='templates')
 
+    # Make sure DB dir exists and migrate any legacy file on first start (SQLite only)
+    if DB_MODE == 'sqlite':
+        _ensure_db_path_and_migrate()
+
+    # DB helpers (works for SQLite and Postgres/psycopg)
+    def _get_conn():
+        if DB_MODE == 'sqlite':
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            return conn
+        else:
+            # Lazy import to avoid requiring psycopg locally when unused
+            import psycopg
+            from psycopg.rows import dict_row
+            return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+    def _adapt_sql(sql: str) -> str:
+        # Our SQL is written with SQLite-style '?' placeholders.
+        # For Postgres (psycopg), convert to '%s'.
+        if DB_MODE == 'pg':
+            # Replace only placeholder tokens. Since our SQL does not contain literal '?', a global replace is fine.
+            return sql.replace('?', '%s')
+        return sql
+
+    def db_execute(sql: str, params: Iterable[Any] = ()):  # returns cursor
+        sql2 = _adapt_sql(sql)
+        if DB_MODE == 'sqlite':
+            cur = g.db.execute(sql2, tuple(params))
+            return cur
+        else:
+            cur = g.db.cursor()
+            cur.execute(sql2, tuple(params))
+            return cur
+
+    def db_query_all(sql: str, params: Iterable[Any] = ()):  # returns list of rows (dict-like)
+        cur = db_execute(sql, params)
+        return cur.fetchall()
+
+    def db_query_one(sql: str, params: Iterable[Any] = ()):  # returns single row or None
+        cur = db_execute(sql, params)
+        return cur.fetchone()
+
     @app.before_request
     def before_request():
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
+        g.db = _get_conn()
 
     @app.teardown_request
     def teardown_request(exception):
         db = getattr(g, 'db', None)
         if db is not None:
-            db.close()
+            try:
+                db.close()
+            except Exception:
+                pass
 
     with app.app_context():
         init_db()
@@ -34,7 +101,7 @@ def create_app():
 
     @app.route('/api/roommates', methods=['GET'])
     def list_roommates():
-        rows = g.db.execute('SELECT id, name, color FROM roommates ORDER BY id').fetchall()
+        rows = db_query_all('SELECT id, name, color FROM roommates ORDER BY id')
         return jsonify([dict(r) for r in rows])
 
     @app.route('/api/roommates', methods=['POST'])
@@ -45,20 +112,32 @@ def create_app():
         if not name:
             return jsonify({'error': 'name is required'}), 400
         try:
-            cur = g.db.execute('INSERT INTO roommates(name, color) VALUES (?, ?)', (name, color))
+            cur = db_execute('INSERT INTO roommates(name, color) VALUES (?, ?)', (name, color))
+            # lastrowid for Postgres: RETURNING is cleaner; fallback by re-query
+            rid = None
+            if DB_MODE == 'sqlite':
+                rid = cur.lastrowid
+            else:
+                # Postgres: get id via name (unique)
+                g.db.commit()
+                row2 = db_query_one('SELECT id FROM roommates WHERE name=?', (name,))
+                rid = row2['id']
             g.db.commit()
-            rid = cur.lastrowid
-            row = g.db.execute('SELECT id, name, color FROM roommates WHERE id=?', (rid,)).fetchone()
+            row = db_query_one('SELECT id, name, color FROM roommates WHERE id=?', (rid,))
             return jsonify(dict(row)), 201
-        except sqlite3.IntegrityError as e:
-            return jsonify({'error': 'Roommate name must be unique'}), 409
+        except Exception as e:
+            # Unique violation handling for both backends
+            msg = repr(e).lower()
+            if 'unique' in msg or 'duplicate key' in msg or '23505' in msg:
+                return jsonify({'error': 'Roommate name must be unique'}), 409
+            raise
 
     @app.route('/api/roommates/<int:rid>', methods=['PUT'])
     def update_roommate(rid):
         data = request.get_json(force=True)
         name = data.get('name')
         color = data.get('color')
-        row = g.db.execute('SELECT id FROM roommates WHERE id=?', (rid,)).fetchone()
+        row = db_query_one('SELECT id FROM roommates WHERE id=?', (rid,))
         if not row:
             return jsonify({'error': 'not found'}), 404
         if name is not None:
@@ -66,17 +145,20 @@ def create_app():
             if not name:
                 return jsonify({'error': 'name cannot be empty'}), 400
             try:
-                g.db.execute('UPDATE roommates SET name=? WHERE id=?', (name, rid))
+                db_execute('UPDATE roommates SET name=? WHERE id=?', (name, rid))
                 g.db.commit()
-            except sqlite3.IntegrityError:
-                return jsonify({'error': 'Roommate name must be unique'}), 409
+            except Exception as e:
+                msg = repr(e).lower()
+                if 'unique' in msg or 'duplicate key' in msg or '23505' in msg:
+                    return jsonify({'error': 'Roommate name must be unique'}), 409
+                raise
         if color is not None:
             color = color.strip()
             if not color:
                 return jsonify({'error': 'color cannot be empty'}), 400
-            g.db.execute('UPDATE roommates SET color=? WHERE id=?', (color, rid))
+            db_execute('UPDATE roommates SET color=? WHERE id=?', (color, rid))
             g.db.commit()
-        row = g.db.execute('SELECT id, name, color FROM roommates WHERE id=?', (rid,)).fetchone()
+        row = db_query_one('SELECT id, name, color FROM roommates WHERE id=?', (rid,))
         return jsonify(dict(row))
 
     def parse_iso(ts: str):
@@ -136,13 +218,13 @@ def create_app():
         args = []
         where = []
         if start:
-            where.append('julianday(replace(e.end, "T", " ")) > julianday(replace(?, "T", " "))')
+            where.append('e.end > ?')
             args.append(start)
         if end:
-            where.append('julianday(replace(e.start, "T", " ")) < julianday(replace(?, "T", " "))')
+            where.append('e.start < ?')
             args.append(end)
         sql = base + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY e.start'
-        rows = g.db.execute(sql, args).fetchall()
+        rows = db_query_all(sql, args)
         return [event_row_to_dict(r) for r in rows]
 
     def find_conflicts(start: str, end: str, exclude_event_id: Optional[int] = None):
@@ -151,13 +233,12 @@ def create_app():
             'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, '
             'e.roommate_id, r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id '
-            'WHERE julianday(replace(e.start, "T", " ")) < julianday(replace(?, "T", " ")) '
-            'AND julianday(replace(e.end, "T", " ")) > julianday(replace(?, "T", " "))'
+            'WHERE e.start < ? AND e.end > ?'
         )
         if exclude_event_id is not None:
             sql += ' AND e.id != ?'
             args.append(exclude_event_id)
-        rows = g.db.execute(sql, args).fetchall()
+        rows = db_query_all(sql, args)
         return [event_row_to_dict(r) for r in rows]
 
     @app.route('/api/events', methods=['GET'])
@@ -184,7 +265,7 @@ def create_app():
 
         if not roommate_id:
             return jsonify({'error': 'roommate_id is required'}), 400
-        rm = g.db.execute('SELECT id FROM roommates WHERE id=?', (roommate_id,)).fetchone()
+        rm = db_query_one('SELECT id FROM roommates WHERE id=?', (roommate_id,))
         if not rm:
             return jsonify({'error': 'invalid roommate_id'}), 400
         try:
@@ -199,22 +280,30 @@ def create_app():
         if conflicts and reject_on_conflict:
             return jsonify({'error': 'conflict', 'conflicts': conflicts}), 409
 
-        cur = g.db.execute(
-            'INSERT INTO events(roommate_id, title, start, end, location, notes) VALUES (?, ?, ?, ?, ?, ?)',
-            (roommate_id, title, start, end, location, notes)
-        )
-        g.db.commit()
-        eid = cur.lastrowid
-        row = g.db.execute(
+        if DB_MODE == 'pg':
+            cur = db_execute(
+                'INSERT INTO events(roommate_id, title, start, end, location, notes) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
+                (roommate_id, title, start, end, location, notes)
+            )
+            eid = cur.fetchone()['id']
+            g.db.commit()
+        else:
+            cur = db_execute(
+                'INSERT INTO events(roommate_id, title, start, end, location, notes) VALUES (?, ?, ?, ?, ?, ?)',
+                (roommate_id, title, start, end, location, notes)
+            )
+            g.db.commit()
+            eid = cur.lastrowid
+        row = db_query_one(
             'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, e.roommate_id, '
             'r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id WHERE e.id=?', (eid,)
-        ).fetchone()
+        )
         return jsonify({'event': event_row_to_dict(row), 'conflicts': conflicts}), 201
 
     @app.route('/api/events/<int:eid>', methods=['PUT'])
     def update_event(eid):
-        row = g.db.execute('SELECT id FROM events WHERE id=?', (eid,)).fetchone()
+        row = db_query_one('SELECT id FROM events WHERE id=?', (eid,))
         if not row:
             return jsonify({'error': 'not found'}), 404
         data = request.get_json(force=True)
@@ -254,7 +343,7 @@ def create_app():
             return jsonify({'error': 'no fields to update'}), 400
 
         # Fetch existing to validate time order if both present after update
-        existing = g.db.execute('SELECT start, end FROM events WHERE id=?', (eid,)).fetchone()
+        existing = db_query_one('SELECT start, end FROM events WHERE id=?', (eid,))
         new_start = None
         new_end = None
         for i, f in enumerate(fields):
@@ -269,20 +358,20 @@ def create_app():
         if new_start >= new_end:
             return jsonify({'error': 'end must be after start'}), 400
 
-        g.db.execute(f'UPDATE events SET {", ".join(fields)} WHERE id=?', (*args, eid))
+        db_execute(f'UPDATE events SET {", ".join(fields)} WHERE id=?', (*args, eid))
         g.db.commit()
         # Conflicts after update (exclude this event)
         conflicts = find_conflicts(new_end, new_start, exclude_event_id=eid)
-        row = g.db.execute(
+        row = db_query_one(
             'SELECT e.id, e.title, e.start, e.end, e.location, e.notes, e.roommate_id, '
             'r.name as roommate_name, r.color as roommate_color '
             'FROM events e JOIN roommates r ON r.id = e.roommate_id WHERE e.id=?', (eid,)
-        ).fetchone()
+        )
         return jsonify({'event': event_row_to_dict(row), 'conflicts': conflicts})
 
     @app.route('/api/events/<int:eid>', methods=['DELETE'])
     def delete_event(eid):
-        cur = g.db.execute('DELETE FROM events WHERE id=?', (eid,))
+        cur = db_execute('DELETE FROM events WHERE id=?', (eid,))
         g.db.commit()
         if cur.rowcount == 0:
             return jsonify({'error': 'not found'}), 404
@@ -297,46 +386,89 @@ def create_app():
 
 
 def init_db():
-    with closing(sqlite3.connect(DB_PATH)) as db:
-        db.executescript(
-            '''
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE IF NOT EXISTS roommates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                color TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                roommate_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                start TEXT NOT NULL,
-                end TEXT NOT NULL,
-                location TEXT,
-                notes TEXT,
-                FOREIGN KEY(roommate_id) REFERENCES roommates(id) ON DELETE CASCADE
-            );
-            '''
-        )
-        # Seed roommates if empty
-        cur = db.execute('SELECT COUNT(*) as c FROM roommates')
-        c = cur.fetchone()[0]
-        if c == 0:
-            defaults = [
-                ('Vatsal',  '#3778C2'),
-                ('Ganesh',  '#EF6C33'),
-                ('Jenil',   '#2BAF2B'),
-                ('Shibin',  '#8E44AD'),
-                ('Jeevan',  '#C0392B'),
-                ('Sarwesh', '#16A085'),
-                ('Tushar',  '#D35400'),
-                ('Rajeev',  '#7F8C8D'),
-                ('Vineet',  '#F1C40F'),
-                ('Prakhar', '#1ABC9C'),
-                ('Srinidhi','#9B59B6'),
-            ]
-            db.executemany('INSERT INTO roommates(name, color) VALUES (?,?)', defaults)
-        db.commit()
+    if DB_MODE == 'sqlite':
+        with closing(sqlite3.connect(DB_PATH)) as db:
+            db.executescript(
+                '''
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE IF NOT EXISTS roommates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    color TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    roommate_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    start TEXT NOT NULL,
+                    end TEXT NOT NULL,
+                    location TEXT,
+                    notes TEXT,
+                    FOREIGN KEY(roommate_id) REFERENCES roommates(id) ON DELETE CASCADE
+                );
+                '''
+            )
+            # Seed roommates if empty
+            cur = db.execute('SELECT COUNT(*) as c FROM roommates')
+            c = cur.fetchone()[0]
+            if c == 0:
+                defaults = [
+                    ('Vatsal',  '#3778C2'),
+                    ('Ganesh',  '#EF6C33'),
+                    ('Jenil',   '#2BAF2B'),
+                    ('Shibin',  '#8E44AD'),
+                    ('Jeevan',  '#C0392B'),
+                    ('Sarwesh', '#16A085'),
+                    ('Tushar',  '#D35400'),
+                    ('Rajeev',  '#7F8C8D'),
+                    ('Vineet',  '#F1C40F'),
+                    ('Prakhar', '#1ABC9C'),
+                    ('Srinidhi','#9B59B6'),
+                ]
+                db.executemany('INSERT INTO roommates(name, color) VALUES (?,?)', defaults)
+            db.commit()
+    else:
+        # Postgres init
+        import psycopg
+        with closing(psycopg.connect(DATABASE_URL)) as db:
+            with db.cursor() as cur:
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS roommates (
+                        id SERIAL PRIMARY KEY,
+                        name TEXT NOT NULL UNIQUE,
+                        color TEXT NOT NULL
+                    );
+                ''')
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS events (
+                        id SERIAL PRIMARY KEY,
+                        roommate_id INTEGER NOT NULL REFERENCES roommates(id) ON DELETE CASCADE,
+                        title TEXT NOT NULL,
+                        start TEXT NOT NULL,
+                        "end" TEXT NOT NULL,
+                        location TEXT,
+                        notes TEXT
+                    );
+                ''')
+                # Seed if empty
+                cur.execute('SELECT COUNT(*) FROM roommates')
+                c = cur.fetchone()[0]
+                if c == 0:
+                    defaults = [
+                        ('Vatsal',  '#3778C2'),
+                        ('Ganesh',  '#EF6C33'),
+                        ('Jenil',   '#2BAF2B'),
+                        ('Shibin',  '#8E44AD'),
+                        ('Jeevan',  '#C0392B'),
+                        ('Sarwesh', '#16A085'),
+                        ('Tushar',  '#D35400'),
+                        ('Rajeev',  '#7F8C8D'),
+                        ('Vineet',  '#F1C40F'),
+                        ('Prakhar', '#1ABC9C'),
+                        ('Srinidhi','#9B59B6'),
+                    ]
+                    cur.executemany('INSERT INTO roommates(name, color) VALUES (%s,%s)', defaults)
+            db.commit()
 
 # Expose a module-level WSGI variable for platforms expecting 'app:app'
 app = create_app()

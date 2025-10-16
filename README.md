@@ -61,7 +61,7 @@ Times are ISO-8601 strings, local or UTC. The UI uses your local time.
 
 ## Deploy
 
-Option A — Render (recommended, persistent storage):
+Option A — Render (with persistent disk):
 
 - Push this folder to a GitHub repo.
 - In Render, create “New +” → “Web Service” → “Build from a Git repository”.
@@ -71,7 +71,14 @@ Option A — Render (recommended, persistent storage):
   - Disk: mounts at `/data`, `DB_PATH=/data/data.db` so events persist.
 - Wait for deploy, then open the Render URL.
 
-Option B — Quick share via ngrok (ephemeral):
+Option B — Supabase (free Postgres, persistent):
+
+- Create a Supabase project → Database → get the `Connection string` (URI). It looks like `postgresql://USER:PASSWORD@HOST:PORT/DB`.
+- In Render, set an environment variable `DATABASE_URL` to that URI.
+- Remove/ignore the Disk in Render; Postgres is now the source of truth.
+- Deploy or restart. The app auto-creates tables and seeds roommates if empty.
+
+Option C — Quick share via ngrok (ephemeral):
 
 - Install ngrok and sign in (free tier is fine).
 - Run locally (`python app.py`), then in another terminal: `ngrok http 5000`.
