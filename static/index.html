@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Roomie Interview Scheduler</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="container">
+      <h1>Roomie Interview Scheduler</h1>
+      <p class="muted">Share interview times so others can plan quiet time.</p>
+    </header>
+
+    <main class="container">
+      <section class="grid">
+        <div>
+          <h3>Add Interview</h3>
+          <form id="event-form">
+            <label>
+              Roommate
+              <select id="roommate"></select>
+            </label>
+            <label>
+              Title
+              <input id="title" type="text" value="Interview" />
+            </label>
+            <div class="grid two">
+              <label>
+                Start
+                <input id="start" type="datetime-local" required />
+              </label>
+              <label>
+                End
+                <input id="end" type="datetime-local" required />
+              </label>
+            </div>
+            <label>
+              Location
+              <input id="location" type="text" placeholder="e.g., Zoom / Office" />
+            </label>
+            <label>
+              Notes
+              <textarea id="notes" rows="2" placeholder="Optional"></textarea>
+            </label>
+            <label>
+              <input id="rejectOnConflict" type="checkbox" />
+              Reject if overlaps with any other interview
+            </label>
+            <button type="submit">Add</button>
+            <small id="form-status" class="muted"></small>
+          </form>
+        </div>
+        <div>
+          <h3>Calendar</h3>
+          <div id="filters"></div>
+          <div id="calendar"></div>
+        </div>
+      </section>
+
+      <details>
+        <summary>Settings</summary>
+        <div id="roommates-settings"></div>
+      </details>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+  </html>
+

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: roomie-interview-scheduler
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -k gthread -b 0.0.0.0:$PORT 'app:create_app()'
+    envVars:
+      - key: DB_PATH
+        value: /data/data.db
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
