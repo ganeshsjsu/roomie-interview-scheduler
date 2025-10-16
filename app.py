@@ -13,6 +13,9 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get('DB_PATH', os.path.join(APP_DIR, 'data.db'))
 # Prefer Postgres if DATABASE_URL is provided (e.g., Supabase)
 DATABASE_URL = os.environ.get('DATABASE_URL')
+# Optional envs to help problematic networks
+PG_FORCE_POOLER = os.environ.get('PG_FORCE_POOLER', 'false').lower() in ('1', 'true', 'yes')
+PG_HOSTADDR_ENV = os.environ.get('PG_HOSTADDR')  # e.g., IPv4 literal for your DB host
 DB_MODE = 'pg' if DATABASE_URL and DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'
 
 
@@ -86,10 +89,20 @@ def _pg_connect(dsn: str, row_factory=None):
         kwargs['row_factory'] = row_factory
     else:
         kwargs['row_factory'] = dict_row
+    # Optionally force Supabase pooler port (6543)
+    try:
+        parts = urlsplit(url)
+        if PG_FORCE_POOLER or (parts.hostname and parts.hostname.endswith('.supabase.co') and (parts.port or 5432) == 5432):
+            url = _set_url_port(url, 6543)
+            # refresh ssl + ipv4 after port change
+            url, ipv4 = _add_ssl_and_ipv4_to_url(url)
+    except Exception:
+        pass
     # First attempt: as-is, prefer IPv4 if available
     try:
-        if ipv4:
-            return psycopg.connect(url, hostaddr=ipv4, **kwargs)
+        hostaddr = PG_HOSTADDR_ENV or ipv4
+        if hostaddr:
+            return psycopg.connect(url, hostaddr=hostaddr, **kwargs)
         return psycopg.connect(url, **kwargs)
     except Exception as e:
         msg = repr(e)
@@ -101,8 +114,9 @@ def _pg_connect(dsn: str, row_factory=None):
             if host.endswith('.supabase.co') and port != 6543:
                 url2 = _set_url_port(url, 6543)
                 url2, ipv4b = _add_ssl_and_ipv4_to_url(url2)
-                if ipv4b:
-                    return psycopg.connect(url2, hostaddr=ipv4b, **kwargs)
+                hostaddr2 = PG_HOSTADDR_ENV or ipv4b
+                if hostaddr2:
+                    return psycopg.connect(url2, hostaddr=hostaddr2, **kwargs)
                 return psycopg.connect(url2, **kwargs)
         except Exception:
             pass
