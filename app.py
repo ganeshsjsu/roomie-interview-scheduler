@@ -539,8 +539,8 @@ def init_db():
                     );
                 ''')
                 # Seed if empty
-                cur.execute('SELECT COUNT(*) FROM roommates')
-                c = cur.fetchone()[0]
+                cur.execute('SELECT COUNT(*) AS c FROM roommates')
+                c = cur.fetchone()['c']
                 if c == 0:
                     defaults = [
                         ('Vatsal',  '#3778C2'),
